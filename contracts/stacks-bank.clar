@@ -103,3 +103,117 @@
     u0
   )
 )
+
+;; Calculate total debt including interest
+(define-read-only (get-total-debt (user principal))
+  (match (map-get? loans user)
+    loan-info (let
+      (
+        (principal-debt (get amount loan-info))
+        (interest-debt (calculate-loan-interest user))
+        (accumulated (default-to {stake-interest: u0, loan-interest: u0} 
+                                (map-get? accumulated-interest user)))
+      )
+      (+ principal-debt interest-debt (get loan-interest accumulated))
+    )
+    u0
+  )
+)
+
+;; Check if a loan is eligible for liquidation
+(define-read-only (is-liquidatable (user principal))
+  (match (map-get? loans user)
+    loan-info (let
+      (
+        (collateral (get collateral loan-info))
+        (total-debt (get-total-debt user))
+        (collateral-ratio (if (> total-debt u0) (/ (* collateral u100) total-debt) u0))
+      )
+      (< collateral-ratio LIQUIDATION-THRESHOLD)
+    )
+    false
+  )
+)
+
+;; Get contract statistics
+(define-read-only (get-contract-stats)
+  {
+    total-staked: (var-get total-staked),
+    total-borrowed: (var-get total-borrowed),
+    stake-rate: (var-get stake-interest-rate),
+    loan-rate: (var-get loan-interest-rate),
+    paused: (var-get contract-paused)
+  }
+)
+
+;; Private functions
+
+;; Update accumulated interest for a user
+(define-private (update-interest (user principal))
+  (let
+    (
+      (stake-interest (calculate-stake-interest user))
+      (loan-interest (calculate-loan-interest user))
+      (current-accumulated (default-to {stake-interest: u0, loan-interest: u0} 
+                                       (map-get? accumulated-interest user)))
+    )
+    (map-set accumulated-interest user
+      {
+        stake-interest: (+ (get stake-interest current-accumulated) stake-interest),
+        loan-interest: (+ (get loan-interest current-accumulated) loan-interest)
+      }
+    )
+    ;; Update timestamps
+    (match (map-get? stakes user)
+      stake-info (map-set stakes user (merge stake-info {last-interest-update: block-height}))
+      true
+    )
+    (match (map-get? loans user)
+      loan-info (map-set loans user (merge loan-info {last-interest-update: block-height}))
+      true
+    )
+  )
+)
+
+;; Public functions
+
+;; Stake STX tokens to earn interest
+(define-public (stake (amount uint))
+  (let
+    (
+      (caller tx-sender)
+      (current-stake (map-get? stakes caller))
+    )
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (>= amount MINIMUM-STAKE) ERR-INVALID-AMOUNT)
+    
+    ;; Transfer STX to contract
+    (try! (stx-transfer? amount caller (as-contract tx-sender)))
+    
+    ;; Update interest before modifying stake
+    (update-interest caller)
+    
+    ;; Update or create stake record
+    (match current-stake
+      existing-stake (map-set stakes caller
+        {
+          amount: (+ (get amount existing-stake) amount),
+          timestamp: (get timestamp existing-stake),
+          last-interest-update: block-height
+        }
+      )
+      (map-set stakes caller
+        {
+          amount: amount,
+          timestamp: block-height,
+          last-interest-update: block-height
+        }
+      )
+    )
+    
+    ;; Update total staked
+    (var-set total-staked (+ (var-get total-staked) amount))
+    
+    (ok amount)
+  )
+)
