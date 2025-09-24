@@ -364,3 +364,43 @@
     (ok collateral)
   )
 )
+;; Admin functions
+
+;; Set stake interest rate (only contract owner)
+(define-public (set-stake-interest-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (<= new-rate MAX-INTEREST-RATE) ERR-INVALID-INTEREST-RATE)
+    (var-set stake-interest-rate new-rate)
+    (ok new-rate)
+  )
+)
+
+;; Set loan interest rate (only contract owner)
+(define-public (set-loan-interest-rate (new-rate uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (<= new-rate MAX-INTEREST-RATE) ERR-INVALID-INTEREST-RATE)
+    (var-set loan-interest-rate new-rate)
+    (ok new-rate)
+  )
+)
+
+;; Pause/unpause contract (only contract owner)
+(define-public (toggle-contract-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (var-set contract-paused (not (var-get contract-paused)))
+    (ok (var-get contract-paused))
+  )
+)
+
+;; Emergency withdraw (only contract owner, when paused)
+(define-public (emergency-withdraw (amount uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-NOT-AUTHORIZED)
+    (asserts! (var-get contract-paused) ERR-NOT-AUTHORIZED)
+    (try! (as-contract (stx-transfer? amount tx-sender CONTRACT-OWNER)))
+    (ok amount)
+  )
+)
