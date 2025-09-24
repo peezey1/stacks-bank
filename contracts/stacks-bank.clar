@@ -217,3 +217,150 @@
     (ok amount)
   )
 )
+
+;; Withdraw staked STX tokens (with earned interest)
+(define-public (withdraw-stake (amount uint))
+  (let
+    (
+      (caller tx-sender)
+      (stake-info (unwrap! (map-get? stakes caller) ERR-STAKE-NOT-FOUND))
+      (stake-interest (calculate-stake-interest caller))
+      (accumulated (default-to {stake-interest: u0, loan-interest: u0} 
+                              (map-get? accumulated-interest caller)))
+      (total-available (+ (get amount stake-info) stake-interest (get stake-interest accumulated)))
+    )
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= total-available amount) ERR-INSUFFICIENT-FUNDS)
+    
+    ;; Update interest
+    (update-interest caller)
+    
+    ;; Calculate remaining stake after withdrawal
+    (let ((remaining-stake (- (get amount stake-info) amount)))
+      ;; Update stake record
+      (if (> remaining-stake u0)
+        (map-set stakes caller
+          {
+            amount: remaining-stake,
+            timestamp: (get timestamp stake-info),
+            last-interest-update: block-height
+          }
+        )
+        (map-delete stakes caller)
+      )
+    )
+    
+    ;; Transfer STX back to user
+    (try! (as-contract (stx-transfer? amount tx-sender caller)))
+    
+    ;; Update total staked
+    (var-set total-staked (- (var-get total-staked) amount))
+    
+    (ok amount)
+  )
+)
+
+;; Take a loan against staked collateral
+(define-public (take-loan (amount uint))
+  (let
+    (
+      (caller tx-sender)
+      (stake-info (unwrap! (map-get? stakes caller) ERR-STAKE-NOT-FOUND))
+      (existing-loan (map-get? loans caller))
+      (collateral-amount (get amount stake-info))
+      (max-loan (/ (* collateral-amount u100) LIQUIDATION-THRESHOLD))
+    )
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (>= amount MINIMUM-LOAN) ERR-INVALID-AMOUNT)
+    (asserts! (is-none existing-loan) ERR-LOAN-ALREADY-EXISTS)
+    (asserts! (<= amount max-loan) ERR-INSUFFICIENT-COLLATERAL)
+    
+    ;; Update interest
+    (update-interest caller)
+    
+    ;; Create loan record
+    (map-set loans caller
+      {
+        amount: amount,
+        collateral: collateral-amount,
+        timestamp: block-height,
+        last-interest-update: block-height
+      }
+    )
+    
+    ;; Transfer loan amount to user
+    (try! (as-contract (stx-transfer? amount tx-sender caller)))
+    
+    ;; Update total borrowed
+    (var-set total-borrowed (+ (var-get total-borrowed) amount))
+    
+    (ok amount)
+  )
+)
+
+;; Repay loan (partial or full)
+(define-public (repay-loan (amount uint))
+  (let
+    (
+      (caller tx-sender)
+      (loan-info (unwrap! (map-get? loans caller) ERR-LOAN-NOT-FOUND))
+      (total-debt (get-total-debt caller))
+    )
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (> amount u0) ERR-INVALID-AMOUNT)
+    (asserts! (<= amount total-debt) ERR-INVALID-AMOUNT)
+    
+    ;; Transfer repayment to contract
+    (try! (stx-transfer? amount caller (as-contract tx-sender)))
+    
+    ;; Update interest
+    (update-interest caller)
+    
+    ;; Calculate remaining debt
+    (let ((remaining-debt (- (get amount loan-info) amount)))
+      (if (> remaining-debt u0)
+        ;; Partial repayment
+        (map-set loans caller (merge loan-info {amount: remaining-debt}))
+        ;; Full repayment - delete loan
+        (map-delete loans caller)
+      )
+    )
+    
+    ;; Update total borrowed
+    (var-set total-borrowed (- (var-get total-borrowed) amount))
+    
+    (ok amount)
+  )
+)
+
+;; Liquidate an under-collateralized loan
+(define-public (liquidate (borrower principal))
+  (let
+    (
+      (loan-info (unwrap! (map-get? loans borrower) ERR-LOAN-NOT-FOUND))
+      (stake-info (unwrap! (map-get? stakes borrower) ERR-STAKE-NOT-FOUND))
+      (total-debt (get-total-debt borrower))
+      (collateral (get collateral loan-info))
+    )
+    (asserts! (not (var-get contract-paused)) ERR-NOT-AUTHORIZED)
+    (asserts! (is-liquidatable borrower) ERR-LIQUIDATION-NOT-ALLOWED)
+    
+    ;; Transfer debt amount from liquidator to contract
+    (try! (stx-transfer? total-debt tx-sender (as-contract tx-sender)))
+    
+    ;; Transfer collateral from contract to liquidator
+    (try! (as-contract (stx-transfer? collateral tx-sender tx-sender)))
+    
+    ;; Clear borrower's loan and stake
+    (map-delete loans borrower)
+    (map-delete stakes borrower)
+    (map-delete accumulated-interest borrower)
+    
+    ;; Update totals
+    (var-set total-borrowed (- (var-get total-borrowed) (get amount loan-info)))
+    (var-set total-staked (- (var-get total-staked) collateral))
+    
+    (ok collateral)
+  )
+)
